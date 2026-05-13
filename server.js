@@ -1,5 +1,3 @@
-
-
 const WebSocket = require("ws");
 const crypto = require("crypto");
 
@@ -9,7 +7,7 @@ const wss = new WebSocket.Server({
 
 const rooms = {};
 
-console.log("WebSocket server running on :3001");
+console.log("WebSocket server running on port 3001");
 
 wss.on("connection", (ws) => {
   console.log("Client connected");
@@ -32,57 +30,74 @@ wss.on("connection", (ws) => {
         case "join-room": {
           const { roomId, name } = data;
 
-          // create room if not exists
           if (!rooms[roomId]) {
             rooms[roomId] = {
-              host: ws,
+              host: null,
               clients: [],
               pending: [],
             };
-
             console.log(`Room created: ${roomId}`);
           }
 
           const room = rooms[roomId];
-
           ws.roomId = roomId;
           ws.name = name;
 
-          // HOST
-          if (room.host === ws) {
+          // HOST (room has no host yet)
+          if (!room.host) {
             ws.role = "host";
+            room.host = ws;
 
-            room.clients.push(ws);
+            // Clear existing clients and pending
+            room.clients = [];
+            room.pending = [];
 
             ws.send(
               JSON.stringify({
                 type: "joined-as-host",
                 id: ws.id,
+                name: ws.name,
                 role: ws.role,
               })
             );
 
             sendRoomUsers(roomId);
-
+            console.log(`${name} joined as HOST in room ${roomId}`);
             return;
           }
 
           // CLIENT -> pending approval
           ws.role = "client";
 
-          room.pending.push(ws);
+          // Cek apakah sudah ada di clients atau pending
+          const alreadyInClients = room.clients.some(
+            (client) => client.id === ws.id
+          );
+          const alreadyInPending = room.pending.some(
+            (client) => client.id === ws.id
+          );
 
-          console.log(`${name} requesting join room ${roomId}`);
+          if (!alreadyInClients && !alreadyInPending) {
+            room.pending.push(ws);
+            console.log(`${name} requesting to join room ${roomId}`);
 
-          // send request to host
-          if (room.host.readyState === WebSocket.OPEN) {
-            room.host.send(
-              JSON.stringify({
-                type: "join-request",
-                id: ws.id,
-                name: ws.name,
-              })
-            );
+            // send request to host
+            if (room.host && room.host.readyState === WebSocket.OPEN) {
+              room.host.send(
+                JSON.stringify({
+                  type: "join-request",
+                  id: ws.id,
+                  name: ws.name,
+                })
+              );
+            } else {
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  message: "Host is not available",
+                })
+              );
+            }
           }
 
           return;
@@ -92,41 +107,40 @@ wss.on("connection", (ws) => {
         // APPROVE USER
         // ====================================================
 
+        // Di backend, pastikan saat approve user tidak double add
         case "approve-user": {
           const room = rooms[ws.roomId];
-
-          if (!room) return;
-
-          // only host can approve
-          if (room.host !== ws) return;
+          if (!room || room.host !== ws) return;
 
           const target = room.pending.find(
             (client) => client.id === data.targetId
           );
-
           if (!target) return;
 
-          // remove from pending
+          // Remove from pending
           room.pending = room.pending.filter(
             (client) => client.id !== data.targetId
           );
 
-          // add to clients
-          room.clients.push(target);
-
-          console.log(`${target.name} approved`);
-
-          // send approved event
-          target.send(
-            JSON.stringify({
-              type: "approved",
-              id: target.id,
-              role: target.role,
-            })
+          // Check if already in clients
+          const alreadyExists = room.clients.some(
+            (client) => client.id === data.targetId
           );
+          if (!alreadyExists) {
+            room.clients.push(target);
+            console.log(`${target.name} approved`);
+
+            target.send(
+              JSON.stringify({
+                type: "approved",
+                id: target.id,
+                name: target.name,
+                role: target.role,
+              })
+            );
+          }
 
           sendRoomUsers(ws.roomId);
-
           return;
         }
 
@@ -151,17 +165,21 @@ wss.on("connection", (ws) => {
             (client) => client.id !== data.targetId
           );
 
-          target.send(
-            JSON.stringify({
-              type: "rejected",
-            })
-          );
+          if (target.readyState === WebSocket.OPEN) {
+            target.send(
+              JSON.stringify({
+                type: "rejected",
+                message: "Your join request was rejected",
+              })
+            );
+            target.close(); // Close the connection
+          }
 
           return;
         }
 
         // ====================================================
-        // SIGNALING
+        // SIGNALING (WebRTC)
         // ====================================================
 
         case "signal": {
@@ -173,9 +191,7 @@ wss.on("connection", (ws) => {
 
           // HOST -> specific client
           if (ws.role === "host") {
-            target = room.clients.find(
-              (client) => client.id === data.targetId
-            );
+            target = room.clients.find((client) => client.id === data.targetId);
           }
 
           // CLIENT -> only HOST
@@ -183,100 +199,13 @@ wss.on("connection", (ws) => {
             target = room.host;
           }
 
-          if (
-            target &&
-            target.readyState === WebSocket.OPEN
-          ) {
+          if (target && target.readyState === WebSocket.OPEN) {
             target.send(
               JSON.stringify({
                 type: "signal",
                 fromId: ws.id,
+                fromName: ws.name,
                 payload: data.payload,
-              })
-            );
-          }
-
-          return;
-        }
-
-        // ====================================================
-        // HOST SEND FILE INFO
-        // ====================================================
-
-        case "send-file": {
-          const room = rooms[ws.roomId];
-
-          if (!room) return;
-
-          // only host can send to clients
-          if (ws.role !== "host") return;
-
-          // broadcast to all clients
-          if (data.mode === "broadcast") {
-            room.clients.forEach((client) => {
-              if (
-                client !== ws &&
-                client.readyState === WebSocket.OPEN
-              ) {
-                client.send(
-                  JSON.stringify({
-                    type: "incoming-file",
-                    fromId: ws.id,
-                    file: data.file,
-                  })
-                );
-              }
-            });
-
-            return;
-          }
-
-          // send to selected client
-          if (data.targetId) {
-            const target = room.clients.find(
-              (client) => client.id === data.targetId
-            );
-
-            if (
-              target &&
-              target.readyState === WebSocket.OPEN
-            ) {
-              target.send(
-                JSON.stringify({
-                  type: "incoming-file",
-                  fromId: ws.id,
-                  file: data.file,
-                })
-              );
-            }
-          }
-
-          return;
-        }
-
-        // ====================================================
-        // CLIENT SEND FILE TO HOST
-        // ====================================================
-
-        case "client-send-file": {
-          const room = rooms[ws.roomId];
-
-          if (!room) return;
-
-          // only client allowed
-          if (ws.role !== "client") return;
-
-          const host = room.host;
-
-          if (
-            host &&
-            host.readyState === WebSocket.OPEN
-          ) {
-            host.send(
-              JSON.stringify({
-                type: "incoming-file",
-                fromId: ws.id,
-                file: data.file,
               })
             );
           }
@@ -305,37 +234,48 @@ wss.on("connection", (ws) => {
 
     if (!room) return;
 
+    console.log(`${ws.name || "Unknown"} disconnected from room ${roomId}`);
+
     // remove from clients
-    room.clients = room.clients.filter(
-      (client) => client !== ws
-    );
+    room.clients = room.clients.filter((client) => client !== ws);
 
     // remove from pending
-    room.pending = room.pending.filter(
-      (client) => client !== ws
-    );
+    room.pending = room.pending.filter((client) => client !== ws);
 
     // host disconnected
     if (room.host === ws) {
+      // Notify all clients that room is closed
       room.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
           client.send(
             JSON.stringify({
               type: "room-closed",
+              message: "Host has left the room",
             })
           );
+          client.close();
+        }
+      });
+
+      room.pending.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(
+            JSON.stringify({
+              type: "room-closed",
+              message: "Host has left the room",
+            })
+          );
+          client.close();
         }
       });
 
       delete rooms[roomId];
-
       console.log(`Room deleted: ${roomId}`);
-
       return;
     }
 
+    // Update remaining users
     sendRoomUsers(roomId);
-
     console.log("Client disconnected");
   });
 });
@@ -346,15 +286,46 @@ wss.on("connection", (ws) => {
 
 function sendRoomUsers(roomId) {
   const room = rooms[roomId];
-
   if (!room) return;
 
-  const users = room.clients.map((client) => ({
-    id: client.id,
-    name: client.name,
-    role: client.role,
-  }));
+  // Use Map to ensure unique users
+  const usersMap = new Map();
 
+  // Add host
+  if (room.host && room.host.readyState === WebSocket.OPEN) {
+    usersMap.set(room.host.id, {
+      id: room.host.id,
+      name: room.host.name,
+      role: "host",
+      connected: true,
+    });
+  }
+
+  // Add clients
+  room.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN && !usersMap.has(client.id)) {
+      usersMap.set(client.id, {
+        id: client.id,
+        name: client.name,
+        role: client.role,
+        connected: true,
+      });
+    }
+  });
+
+  const users = Array.from(usersMap.values());
+
+  // Send to host
+  if (room.host && room.host.readyState === WebSocket.OPEN) {
+    room.host.send(
+      JSON.stringify({
+        type: "room-users",
+        users,
+      })
+    );
+  }
+
+  // Send to all clients
   room.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(
@@ -366,3 +337,7 @@ function sendRoomUsers(roomId) {
     }
   });
 }
+
+// Optional: Health check endpoint for monitoring
+console.log("WebSocket signaling server is running");
+console.log("Waiting for connections...");
