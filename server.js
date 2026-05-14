@@ -81,14 +81,32 @@ wss.on("connection", (ws) => {
             room.pending.push(ws);
             console.log(`${name} requesting to join room ${roomId}`);
 
-            // send request to host
+            // send request to host with full pending list (lebih reliable)
             if (room.host && room.host.readyState === WebSocket.OPEN) {
+              // Kirim single request (optional, untuk notifikasi)
               room.host.send(
                 JSON.stringify({
                   type: "join-request",
                   id: ws.id,
                   name: ws.name,
                 })
+              );
+
+              // Kirim full pending list (untuk memastikan UI sinkron)
+              const pendingUsersList = room.pending.map((client) => ({
+                id: client.id,
+                name: client.name,
+              }));
+
+              room.host.send(
+                JSON.stringify({
+                  type: "pending-users-update",
+                  pending: pendingUsersList,
+                })
+              );
+
+              console.log(
+                `Sent join request and pending list to host. Total pending: ${room.pending.length}`
               );
             } else {
               ws.send(
@@ -97,7 +115,13 @@ wss.on("connection", (ws) => {
                   message: "Host is not available",
                 })
               );
+              // Remove from pending if host not available
+              room.pending = room.pending.filter(
+                (client) => client.id !== ws.id
+              );
             }
+          } else {
+            console.log(`${name} already in clients or pending, skipping...`);
           }
 
           return;
@@ -110,7 +134,8 @@ wss.on("connection", (ws) => {
         // Di backend, pastikan saat approve user tidak double add
         case "approve-user": {
           const room = rooms[ws.roomId];
-          if (!room || room.host !== ws) return;
+          if (!room) return;
+          if (room.host !== ws) return;
 
           const target = room.pending.find(
             (client) => client.id === data.targetId
@@ -130,12 +155,30 @@ wss.on("connection", (ws) => {
             room.clients.push(target);
             console.log(`${target.name} approved`);
 
-            target.send(
+            // Send approved event to target
+            if (target.readyState === WebSocket.OPEN) {
+              target.send(
+                JSON.stringify({
+                  type: "approved",
+                  id: target.id,
+                  name: target.name,
+                  role: target.role,
+                })
+              );
+            }
+          }
+
+          // Kirim updated pending list ke host
+          const pendingUsersList = room.pending.map((client) => ({
+            id: client.id,
+            name: client.name,
+          }));
+
+          if (room.host && room.host.readyState === WebSocket.OPEN) {
+            room.host.send(
               JSON.stringify({
-                type: "approved",
-                id: target.id,
-                name: target.name,
-                role: target.role,
+                type: "pending-users-update",
+                pending: pendingUsersList,
               })
             );
           }
@@ -150,30 +193,77 @@ wss.on("connection", (ws) => {
 
         case "reject-user": {
           const room = rooms[ws.roomId];
-
           if (!room) return;
-
           if (room.host !== ws) return;
 
           const target = room.pending.find(
             (client) => client.id === data.targetId
           );
-
           if (!target) return;
 
+          // Remove from pending
           room.pending = room.pending.filter(
             (client) => client.id !== data.targetId
           );
 
+          // Send rejection to client
           if (target.readyState === WebSocket.OPEN) {
             target.send(
               JSON.stringify({
                 type: "rejected",
-                message: "Your join request was rejected",
+                message: "Your join request was rejected by the host",
+                roomId: ws.roomId,
               })
             );
-            target.close(); // Close the connection
+
+            setTimeout(() => {
+              if (target.readyState === WebSocket.OPEN) {
+                target.close(1001, "Rejected by host");
+              }
+            }, 500);
           }
+
+          // HANYA kirim ke host yang melakukan reject, bukan semua host
+          const pendingUsersList = room.pending.map((client) => ({
+            id: client.id,
+            name: client.name,
+          }));
+
+          // Kirim hanya ke host yang sedang aktif (ws)
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "pending-users-update",
+                pending: pendingUsersList,
+              })
+            );
+          }
+
+          console.log(
+            `${target.name} rejected. Remaining pending: ${room.pending.length}`
+          );
+          sendRoomUsers(ws.roomId);
+          return;
+        }
+
+        case "get-pending-users": {
+          const room = rooms[ws.roomId];
+          if (!room) return;
+
+          // Only host can get pending users
+          if (room.host !== ws) return;
+
+          const pendingUsersList = room.pending.map((client) => ({
+            id: client.id,
+            name: client.name,
+          }));
+
+          ws.send(
+            JSON.stringify({
+              type: "pending-users-update",
+              pending: pendingUsersList,
+            })
+          );
 
           return;
         }
