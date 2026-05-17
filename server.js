@@ -14,41 +14,80 @@ wss.on("connection", (ws) => {
 
   ws.id = crypto.randomUUID();
 
-  // ====================================================
-  // MESSAGE
-  // ====================================================
-
   ws.on("message", (message) => {
     try {
       const data = JSON.parse(message);
 
       switch (data.type) {
-        // ====================================================
-        // JOIN ROOM
-        // ====================================================
-
         case "join-room": {
-          const { roomId, name } = data;
+          const { roomId, name, mode } = data;
+
+          // ✅ validasi mode
+          if (!mode || !["full", "share", "receive"].includes(mode)) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                message: "Invalid room mode",
+              })
+            );
+            ws.close();
+            return;
+          }
 
           if (!rooms[roomId]) {
+            // ✅ hanya mode 'full' atau 'share' yang bisa membuat room
+            if (mode !== "full" && mode !== "share") {
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  message: "Only full or share mode can create a room",
+                })
+              );
+              ws.close();
+              return;
+            }
+
             rooms[roomId] = {
               host: null,
               clients: [],
               pending: [],
+              mode: mode,
             };
-            console.log(`Room created: ${roomId}`);
+            console.log(`Room created: ${roomId} with mode: ${mode}`);
           }
 
           const room = rooms[roomId];
+
+          // ✅ PENGECUALIAN: mode "receive" bisa join ke room APAPUN
+          const isReceiveMode = mode === "receive";
+          const isModeMatch = room.mode === mode;
+
+          // ✅ Jika bukan receive mode, baru cek kesesuaian mode
+          if (!isReceiveMode && !isModeMatch) {
+            let expectedMode = room.mode;
+            if (room.mode === "share") expectedMode = "receive";
+            if (room.mode === "full" && mode === "share") expectedMode = "full";
+
+            ws.send(
+              JSON.stringify({
+                type: "room-mode-mismatch",
+                message: `This room is in ${room.mode} mode. Please use ${expectedMode} mode.`,
+                expectedMode: expectedMode,
+                roomId: roomId,
+              })
+            );
+            ws.close();
+            return;
+          }
+
           ws.roomId = roomId;
           ws.name = name;
+          ws.mode = mode;
 
-          // HOST (room has no host yet)
-          if (!room.host) {
+          // HOST (hanya untuk mode full dan share)
+          if (!room.host && (mode === "full" || mode === "share")) {
             ws.role = "host";
             room.host = ws;
-
-            // Clear existing clients and pending
             room.clients = [];
             room.pending = [];
 
@@ -58,18 +97,32 @@ wss.on("connection", (ws) => {
                 id: ws.id,
                 name: ws.name,
                 role: ws.role,
+                mode: room.mode,
               })
             );
 
             sendRoomUsers(roomId);
-            console.log(`${name} joined as HOST in room ${roomId}`);
+            console.log(
+              `${name} joined as HOST in room ${roomId} (mode: ${mode})`
+            );
             return;
           }
 
-          // CLIENT -> pending approval
+          // ✅ cegah client dengan mode receive menjadi host
+          if (!room.host && mode === "receive") {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                message: "No host available in receive-only room",
+              })
+            );
+            ws.close();
+            return;
+          }
+
+          // CLIENT
           ws.role = "client";
 
-          // Cek apakah sudah ada di clients atau pending
           const alreadyInClients = room.clients.some(
             (client) => client.id === ws.id
           );
@@ -77,61 +130,72 @@ wss.on("connection", (ws) => {
             (client) => client.id === ws.id
           );
 
-          if (!alreadyInClients && !alreadyInPending) {
-            room.pending.push(ws);
-            console.log(`${name} requesting to join room ${roomId}`);
-
-            // send request to host with full pending list (lebih reliable)
-            if (room.host && room.host.readyState === WebSocket.OPEN) {
-              // Kirim single request (optional, untuk notifikasi)
-              room.host.send(
-                JSON.stringify({
-                  type: "join-request",
-                  id: ws.id,
-                  name: ws.name,
-                })
-              );
-
-              // Kirim full pending list (untuk memastikan UI sinkron)
-              const pendingUsersList = room.pending.map((client) => ({
-                id: client.id,
-                name: client.name,
-              }));
-
-              room.host.send(
-                JSON.stringify({
-                  type: "pending-users-update",
-                  pending: pendingUsersList,
-                })
-              );
-
-              console.log(
-                `Sent join request and pending list to host. Total pending: ${room.pending.length}`
-              );
-            } else {
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  message: "Host is not available",
-                })
-              );
-              // Remove from pending if host not available
-              room.pending = room.pending.filter(
-                (client) => client.id !== ws.id
-              );
-            }
-          } else {
-            console.log(`${name} already in clients or pending, skipping...`);
+          // ✅ Jika sudah di clients, kirim approved langsung (reconnect)
+          if (alreadyInClients) {
+            console.log(
+              `${name} already in clients, sending approved directly`
+            );
+            ws.send(
+              JSON.stringify({
+                type: "approved",
+                id: ws.id,
+                name: ws.name,
+                role: ws.role,
+              })
+            );
+            return;
           }
 
+          // ✅ Jika sudah di pending, skip duplicate
+          if (alreadyInPending) {
+            console.log(`${name} already in pending, skipping duplicate`);
+            return;
+          }
+
+          // ✅ Proses request baru
+          room.pending.push(ws);
+          console.log(
+            `${name} requesting to join room ${roomId} (mode: ${mode})`
+          );
+
+          if (room.host && room.host.readyState === WebSocket.OPEN) {
+            room.host.send(
+              JSON.stringify({
+                type: "join-request",
+                id: ws.id,
+                name: ws.name,
+                mode: ws.mode,
+              })
+            );
+
+            const pendingUsersList = room.pending.map((client) => ({
+              id: client.id,
+              name: client.name,
+              mode: client.mode,
+            }));
+
+            room.host.send(
+              JSON.stringify({
+                type: "pending-users-update",
+                pending: pendingUsersList,
+              })
+            );
+
+            console.log(
+              `Sent join request to host. Total pending: ${room.pending.length}`
+            );
+          } else {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                message: "Host is not available",
+              })
+            );
+            room.pending = room.pending.filter((client) => client.id !== ws.id);
+          }
           return;
         }
 
-        // ====================================================
-        // APPROVE USER
-        // ====================================================
-
-        // Di backend, pastikan saat approve user tidak double add
         case "approve-user": {
           const room = rooms[ws.roomId];
           if (!room) return;
@@ -142,20 +206,18 @@ wss.on("connection", (ws) => {
           );
           if (!target) return;
 
-          // Remove from pending
           room.pending = room.pending.filter(
             (client) => client.id !== data.targetId
           );
 
-          // Check if already in clients
           const alreadyExists = room.clients.some(
             (client) => client.id === data.targetId
           );
+
           if (!alreadyExists) {
             room.clients.push(target);
             console.log(`${target.name} approved`);
 
-            // Send approved event to target
             if (target.readyState === WebSocket.OPEN) {
               target.send(
                 JSON.stringify({
@@ -168,7 +230,6 @@ wss.on("connection", (ws) => {
             }
           }
 
-          // Kirim updated pending list ke host
           const pendingUsersList = room.pending.map((client) => ({
             id: client.id,
             name: client.name,
@@ -187,14 +248,9 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        // ====================================================
-        // REJECT USER
-        // ====================================================
-
         case "reject-user": {
           const room = rooms[ws.roomId];
-          if (!room) return;
-          if (room.host !== ws) return;
+          if (!room || room.host !== ws) return;
 
           const target = room.pending.find(
             (client) => client.id === data.targetId
@@ -215,21 +271,14 @@ wss.on("connection", (ws) => {
                 roomId: ws.roomId,
               })
             );
-
-            setTimeout(() => {
-              if (target.readyState === WebSocket.OPEN) {
-                target.close(1001, "Rejected by host");
-              }
-            }, 500);
+            target.close();
           }
 
-          // HANYA kirim ke host yang melakukan reject, bukan semua host
           const pendingUsersList = room.pending.map((client) => ({
             id: client.id,
             name: client.name,
           }));
 
-          // Kirim hanya ke host yang sedang aktif (ws)
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
@@ -248,10 +297,7 @@ wss.on("connection", (ws) => {
 
         case "get-pending-users": {
           const room = rooms[ws.roomId];
-          if (!room) return;
-
-          // Only host can get pending users
-          if (room.host !== ws) return;
+          if (!room || room.host !== ws) return;
 
           const pendingUsersList = room.pending.map((client) => ({
             id: client.id,
@@ -264,27 +310,19 @@ wss.on("connection", (ws) => {
               pending: pendingUsersList,
             })
           );
-
           return;
         }
 
-        // ====================================================
-        // SIGNALING (WebRTC)
-        // ====================================================
-
         case "signal": {
           const room = rooms[ws.roomId];
-
           if (!room) return;
 
           let target = null;
 
-          // HOST -> specific client
           if (ws.role === "host") {
             target = room.clients.find((client) => client.id === data.targetId);
           }
 
-          // CLIENT -> only HOST
           if (ws.role === "client") {
             target = room.host;
           }
@@ -299,7 +337,6 @@ wss.on("connection", (ws) => {
               })
             );
           }
-
           return;
         }
 
@@ -311,30 +348,19 @@ wss.on("connection", (ws) => {
     }
   });
 
-  // ====================================================
-  // DISCONNECT
-  // ====================================================
-
   ws.on("close", () => {
     const roomId = ws.roomId;
-
     if (!roomId) return;
 
     const room = rooms[roomId];
-
     if (!room) return;
 
     console.log(`${ws.name || "Unknown"} disconnected from room ${roomId}`);
 
-    // remove from clients
     room.clients = room.clients.filter((client) => client !== ws);
-
-    // remove from pending
     room.pending = room.pending.filter((client) => client !== ws);
 
-    // host disconnected
     if (room.host === ws) {
-      // Notify all clients that room is closed
       room.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
           client.send(
@@ -364,24 +390,17 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // Update remaining users
     sendRoomUsers(roomId);
     console.log("Client disconnected");
   });
 });
 
-// ====================================================
-// HELPERS
-// ====================================================
-
 function sendRoomUsers(roomId) {
   const room = rooms[roomId];
   if (!room) return;
 
-  // Use Map to ensure unique users
   const usersMap = new Map();
 
-  // Add host
   if (room.host && room.host.readyState === WebSocket.OPEN) {
     usersMap.set(room.host.id, {
       id: room.host.id,
@@ -391,7 +410,6 @@ function sendRoomUsers(roomId) {
     });
   }
 
-  // Add clients
   room.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN && !usersMap.has(client.id)) {
       usersMap.set(client.id, {
@@ -405,7 +423,6 @@ function sendRoomUsers(roomId) {
 
   const users = Array.from(usersMap.values());
 
-  // Send to host
   if (room.host && room.host.readyState === WebSocket.OPEN) {
     room.host.send(
       JSON.stringify({
@@ -415,7 +432,6 @@ function sendRoomUsers(roomId) {
     );
   }
 
-  // Send to all clients
   room.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(
@@ -428,6 +444,5 @@ function sendRoomUsers(roomId) {
   });
 }
 
-// Optional: Health check endpoint for monitoring
 console.log("WebSocket signaling server is running");
 console.log("Waiting for connections...");
