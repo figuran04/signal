@@ -58,14 +58,12 @@ wss.on("connection", (ws) => {
 
           const room = rooms[roomId];
 
-          // ✅ PENgecualian: mode "receive" bisa join ke room APAPUN
-          // (share, full, atau receive sendiri)
+          // ✅ PENGECUALIAN: mode "receive" bisa join ke room APAPUN
           const isReceiveMode = mode === "receive";
           const isModeMatch = room.mode === mode;
 
           // ✅ Jika bukan receive mode, baru cek kesesuaian mode
           if (!isReceiveMode && !isModeMatch) {
-            // Tentukan expected mode yang benar untuk redirect
             let expectedMode = room.mode;
             if (room.mode === "share") expectedMode = "receive";
             if (room.mode === "full" && mode === "share") expectedMode = "full";
@@ -132,29 +130,6 @@ wss.on("connection", (ws) => {
             (client) => client.id === ws.id
           );
 
-<<<<<<< Updated upstream
-          if (!alreadyInClients && !alreadyInPending) {
-            room.pending.push(ws);
-            console.log(`${name} requesting to join room ${roomId}`);
-
-            // send request to host
-            if (room.host && room.host.readyState === WebSocket.OPEN) {
-              room.host.send(
-                JSON.stringify({
-                  type: "join-request",
-                  id: ws.id,
-                  name: ws.name,
-                })
-              );
-            } else {
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  message: "Host is not available",
-                })
-              );
-            }
-=======
           // ✅ Jika sudah di clients, kirim approved langsung (reconnect)
           if (alreadyInClients) {
             console.log(
@@ -169,7 +144,6 @@ wss.on("connection", (ws) => {
               })
             );
             return;
->>>>>>> Stashed changes
           }
 
           // ✅ Jika sudah di pending, skip duplicate
@@ -238,13 +212,11 @@ wss.on("connection", (ws) => {
           const alreadyExists = room.clients.some(
             (client) => client.id === data.targetId
           );
+
           if (!alreadyExists) {
             room.clients.push(target);
             console.log(`${target.name} approved`);
 
-<<<<<<< Updated upstream
-            target.send(
-=======
             if (target.readyState === WebSocket.OPEN) {
               target.send(
                 JSON.stringify({
@@ -264,12 +236,9 @@ wss.on("connection", (ws) => {
 
           if (room.host && room.host.readyState === WebSocket.OPEN) {
             room.host.send(
->>>>>>> Stashed changes
               JSON.stringify({
-                type: "approved",
-                id: target.id,
-                name: target.name,
-                role: target.role,
+                type: "pending-users-update",
+                pending: pendingUsersList,
               })
             );
           }
@@ -280,15 +249,11 @@ wss.on("connection", (ws) => {
 
         case "reject-user": {
           const room = rooms[ws.roomId];
-
-          if (!room) return;
-
-          if (room.host !== ws) return;
+          if (!room || room.host !== ws) return;
 
           const target = room.pending.find(
             (client) => client.id === data.targetId
           );
-
           if (!target) return;
 
           room.pending = room.pending.filter(
@@ -302,11 +267,9 @@ wss.on("connection", (ws) => {
                 message: "Your join request was rejected",
               })
             );
-            target.close(); // Close the connection
+            target.close();
           }
 
-<<<<<<< Updated upstream
-=======
           const pendingUsersList = room.pending.map((client) => ({
             id: client.id,
             name: client.name,
@@ -330,9 +293,7 @@ wss.on("connection", (ws) => {
 
         case "get-pending-users": {
           const room = rooms[ws.roomId];
-          if (!room) return;
-
-          if (room.host !== ws) return;
+          if (!room || room.host !== ws) return;
 
           const pendingUsersList = room.pending.map((client) => ({
             id: client.id,
@@ -345,14 +306,11 @@ wss.on("connection", (ws) => {
               pending: pendingUsersList,
             })
           );
-
->>>>>>> Stashed changes
           return;
         }
 
         case "signal": {
           const room = rooms[ws.roomId];
-
           if (!room) return;
 
           let target = null;
@@ -375,7 +333,6 @@ wss.on("connection", (ws) => {
               })
             );
           }
-
           return;
         }
 
@@ -389,17 +346,14 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     const roomId = ws.roomId;
-
     if (!roomId) return;
 
     const room = rooms[roomId];
-
     if (!room) return;
 
     console.log(`${ws.name || "Unknown"} disconnected from room ${roomId}`);
 
     room.clients = room.clients.filter((client) => client !== ws);
-
     room.pending = room.pending.filter((client) => client !== ws);
 
     if (room.host === ws) {
