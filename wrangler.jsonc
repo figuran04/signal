@@ -1,0 +1,25 @@
+{
+    "$schema": "./node_modules/wrangler/config-schema.json",
+    "name": "signal",
+    "main": "src/index.js",
+    "compatibility_date": "2025-09-23",
+    "compatibility_flags": ["nodejs_compat"],
+    "workers_dev": true,
+    "durable_objects": {
+        "bindings": [
+            {
+                "name": "SIGNAL_ROOM",
+                "class_name": "SignalRoom"
+            }
+        ]
+    },
+    "migrations": [
+        {
+            "tag": "v1",
+            "new_sqlite_classes": ["SignalRoom"]
+        }
+    ],
+    "observability": {
+        "enabled": true
+    }
+}

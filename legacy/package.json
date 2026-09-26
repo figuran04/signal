@@ -1,0 +1,5 @@
+{
+    "name": "signal-legacy-node-server",
+    "private": true,
+    "type": "commonjs"
+}

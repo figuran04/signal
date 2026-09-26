@@ -1,21 +1,25 @@
 {
     "name": "signal",
     "version": "1.0.0",
-    "description": "",
-    "main": "index.js",
+    "description": "Cloudflare Workers signaling server (WebSocket Hibernation + Durable Object)",
+    "private": true,
+    "type": "module",
+    "main": "src/index.js",
     "scripts": {
-        "dev": "nodemon server.js",
-        "start": "node server.js",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "dev": "wrangler dev",
+        "deploy": "wrangler deploy",
+        "preview": "wrangler dev",
+        "start": "wrangler dev",
+        "test": "node test/e2e.mjs",
+        "dev:node": "nodemon legacy/server.js",
+        "start:node": "node legacy/server.js"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
-    "type": "commonjs",
-    "dependencies": {
-        "ws": "^8.20.0"
-    },
     "devDependencies": {
-        "nodemon": "^3.1.14"
+        "nodemon": "^3.1.14",
+        "wrangler": "^4.141.0",
+        "ws": "^8.20.0"
     }
 }
